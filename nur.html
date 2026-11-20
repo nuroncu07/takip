@@ -1489,6 +1489,16 @@ function escapeHtml(str){
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function normalizeText(val) {
+  return val === undefined || val === null ? '' : String(val).trim().toLocaleLowerCase('tr');
+}
+
+function listIncludesNormalized(list, targetVal) {
+  var targetNorm = normalizeText(targetVal);
+  if (!targetNorm || !Array.isArray(list)) return false;
+  return list.some(function(item) { return normalizeText(item) === targetNorm; });
+}
+
 function parseListInput(rawVal) {
   if (!rawVal) return [];
   if (Array.isArray(rawVal)) {
@@ -1508,30 +1518,57 @@ function isUserAdmin() {
   return !!(isApprovedUser() && currentUserProfile.role === 'admin');
 }
 
+function getAssignedGroups() {
+  return (currentUserProfile && Array.isArray(currentUserProfile.assignedGroups))
+    ? currentUserProfile.assignedGroups.filter(Boolean) : [];
+}
+
+function getAssignedCourses() {
+  return (currentUserProfile && Array.isArray(currentUserProfile.assignedCourses))
+    ? currentUserProfile.assignedCourses.filter(Boolean) : [];
+}
+
+function syncAssignedCategoriesToLists() {
+  if (!isApprovedUser() || isUserAdmin()) return;
+
+  var assignedGroups = getAssignedGroups();
+  var assignedCourses = getAssignedCourses();
+
+  assignedGroups.forEach(function(g) {
+    if (!listIncludesNormalized(gruplar, g)) {
+      addToList(gruplar, g, saveGruplar);
+    }
+  });
+
+  assignedCourses.forEach(function(k) {
+    if (!listIncludesNormalized(kurlar, k)) {
+      addToList(kurlar, k, saveKurs);
+    }
+    if (!listIncludesNormalized(departments, k)) {
+      addToList(departments, k, saveDepartments);
+    }
+  });
+}
+
 function canTeacherAccessStudent(student) {
   if (!isApprovedUser()) return false;
   if (isUserAdmin()) return true;
 
-  if (student.ownerUid && student.ownerUid !== currentAuthUser.uid) {
-    return false;
+  var assignedGroups = getAssignedGroups();
+  var assignedCourses = getAssignedCourses();
+
+  // Öğretmene ne grup ne de ders/kur atanmamışsa yalnızca kendi oluşturduğu öğrencileri görsün
+  if (assignedGroups.length === 0 && assignedCourses.length === 0) {
+    return !student.ownerUid || student.ownerUid === currentAuthUser.uid;
   }
 
-  var assignedGroups = (currentUserProfile && Array.isArray(currentUserProfile.assignedGroups))
-    ? currentUserProfile.assignedGroups : [];
-  var assignedCourses = (currentUserProfile && Array.isArray(currentUserProfile.assignedCourses))
-    ? currentUserProfile.assignedCourses : [];
+  var matchesGroup = assignedGroups.length === 0 || (student.grup && listIncludesNormalized(assignedGroups, student.grup));
+  var matchesCourse = assignedCourses.length === 0 || (
+    (student.kur && listIncludesNormalized(assignedCourses, student.kur)) ||
+    (student.bolum && listIncludesNormalized(assignedCourses, student.bolum))
+  );
 
-  if (assignedGroups.length > 0 && (!student.grup || assignedGroups.indexOf(student.grup) === -1)) {
-    return false;
-  }
-  if (assignedCourses.length > 0) {
-    var matchesKur = student.kur && assignedCourses.indexOf(student.kur) !== -1;
-    var matchesBolum = student.bolum && assignedCourses.indexOf(student.bolum) !== -1;
-    if (!matchesKur && !matchesBolum) {
-      return false;
-    }
-  }
-  return true;
+  return matchesGroup && matchesCourse;
 }
 
 // ==========================================
@@ -1636,13 +1673,16 @@ function renderAuthBar() {
     badgeEl.textContent = '👨‍🏫 Öğretmen';
     adminBtn.style.display = 'none';
     adminCard.classList.remove('open');
+    var grpList = getAssignedGroups();
+    var crsList = getAssignedCourses();
     if (scopeEl) {
-      var grpList = (currentUserProfile && Array.isArray(currentUserProfile.assignedGroups) && currentUserProfile.assignedGroups.length)
-        ? ' • Gruplar: ' + currentUserProfile.assignedGroups.join(', ') : '';
-      var crsList = (currentUserProfile && Array.isArray(currentUserProfile.assignedCourses) && currentUserProfile.assignedCourses.length)
-        ? ' • Ders/Kur: ' + currentUserProfile.assignedCourses.join(', ') : '';
-      scopeEl.textContent = 'Öğretmen görünümü: Yalnızca kendi kayıtlı öğrenci ve yoklama verilerinizi görürsünüz' + grpList + crsList + '.';
+      var grpText = grpList.length ? ' • Atanan Sınıflar/Gruplar: ' + grpList.join(', ') : '';
+      var crsText = crsList.length ? ' • Atanan Ders/Kur: ' + crsList.join(', ') : '';
+      scopeEl.textContent = 'Öğretmen görünümü: Size atanan sınıf ve öğrenci listelerini görebilir ve filtreleyebilirsiniz' + grpText + crsText + '.';
     }
+    syncAssignedCategoriesToLists();
+    renderChips();
+    renderFilterChips();
   }
 }
 
@@ -1999,13 +2039,14 @@ function rebuildCategoriesFromStudents() {
   var nextKur = [];
   var nextGrup = [];
   students.forEach(function(s) {
-    if (s.bolum && nextBolum.indexOf(s.bolum) === -1) nextBolum.push(s.bolum);
-    if (s.kur && nextKur.indexOf(s.kur) === -1) nextKur.push(s.kur);
-    if (s.grup && nextGrup.indexOf(s.grup) === -1) nextGrup.push(s.grup);
+    if (s.bolum && !listIncludesNormalized(nextBolum, s.bolum)) nextBolum.push(s.bolum);
+    if (s.kur && !listIncludesNormalized(nextKur, s.kur)) nextKur.push(s.kur);
+    if (s.grup && !listIncludesNormalized(nextGrup, s.grup)) nextGrup.push(s.grup);
   });
   departments = nextBolum;
   kurlar = nextKur;
   gruplar = nextGrup;
+  syncAssignedCategoriesToLists();
 }
 
 function saveStudents(){ saveJson(STUDENTS_KEY, students); }
@@ -2128,7 +2169,7 @@ function renderChipGroup(containerId, list, selectedValue, onSelect, emptyText, 
   }
   list.forEach(function(item) {
     var chip = document.createElement('div');
-    chip.className = 'chip ' + colorClass + (item === selectedValue ? ' active' : '');
+    chip.className = 'chip ' + colorClass + (normalizeText(item) === normalizeText(selectedValue) && selectedValue !== '' ? ' active' : '');
 
     var lbl = document.createElement('span');
     lbl.className = 'chip-label';
@@ -2169,17 +2210,17 @@ function renderChipGroup(containerId, list, selectedValue, onSelect, emptyText, 
 
 function renderChips(){
   renderChipGroup('bolum-chips', departments, selectedBolum, function(item) {
-    selectedBolum = (selectedBolum === item) ? '' : item;
+    selectedBolum = (normalizeText(selectedBolum) === normalizeText(item)) ? '' : item;
     renderChips();
   }, 'Henüz bölüm eklenmedi.', 'chip-teal', 'bolum');
 
   renderChipGroup('kur-chips', kurlar, selectedKur, function(item) {
-    selectedKur = (selectedKur === item) ? '' : item;
+    selectedKur = (normalizeText(selectedKur) === normalizeText(item)) ? '' : item;
     renderChips();
   }, 'Henüz kur eklenmedi.', 'chip-amber', 'kur');
 
   renderChipGroup('grup-chips', gruplar, selectedGrup, function(item) {
-    selectedGrup = (selectedGrup === item) ? '' : item;
+    selectedGrup = (normalizeText(selectedGrup) === normalizeText(item)) ? '' : item;
     renderChips();
   }, 'Henüz grup eklenmedi.', 'chip-purple', 'grup');
 }
@@ -2219,10 +2260,10 @@ function renderFilterChips(){
     departments.forEach(function(d) {
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'chip chip-teal' + (filterBolum === d ? ' active' : '');
+      btn.className = 'chip chip-teal' + (normalizeText(filterBolum) === normalizeText(d) ? ' active' : '');
       btn.textContent = d;
       btn.addEventListener('click', function() {
-        filterBolum = (filterBolum === d) ? '' : d;
+        filterBolum = (normalizeText(filterBolum) === normalizeText(d)) ? '' : d;
         renderFilterChips();
         renderStudents();
       });
@@ -2236,17 +2277,17 @@ function renderFilterChips(){
     var allGrupBtn = document.createElement('button');
     allGrupBtn.type = 'button';
     allGrupBtn.className = 'chip chip-primary' + (filterGrup === '' ? ' active' : '');
-    allGrupBtn.textContent = 'Tüm Gruplar';
+    allGrupBtn.textContent = 'Tüm Sınıflar / Gruplar';
     allGrupBtn.addEventListener('click', function() { filterGrup = ''; renderFilterChips(); renderStudents(); });
     wrapGrup.appendChild(allGrupBtn);
 
     gruplar.forEach(function(g) {
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'chip chip-purple' + (filterGrup === g ? ' active' : '');
+      btn.className = 'chip chip-purple' + (normalizeText(filterGrup) === normalizeText(g) ? ' active' : '');
       btn.textContent = g;
       btn.addEventListener('click', function() {
-        filterGrup = (filterGrup === g) ? '' : g;
+        filterGrup = (normalizeText(filterGrup) === normalizeText(g)) ? '' : g;
         renderFilterChips();
         renderStudents();
       });
@@ -2305,8 +2346,8 @@ function renderStudents(){
   body.innerHTML = '';
 
   var list = students.filter(function(s) {
-    var matchGrup = filterGrup ? (s.grup === filterGrup) : true;
-    var matchBolum = filterBolum ? (s.bolum === filterBolum) : true;
+    var matchGrup = filterGrup ? (normalizeText(s.grup) === normalizeText(filterGrup)) : true;
+    var matchBolum = filterBolum ? (normalizeText(s.bolum) === normalizeText(filterBolum)) : true;
     return matchGrup && matchBolum;
   });
 
@@ -2319,11 +2360,17 @@ function renderStudents(){
   if(list.length === 0){
     if (empty) {
       empty.style.display = 'block';
-      empty.textContent = students.length === 0
-        ? (!isUserAdmin()
-            ? 'Size ait kayıtlı öğrenci bulunmuyor. Yeni öğrenci ekleyebilir veya bulut senkronizasyonu yapabilirsiniz.'
-            : 'Henüz öğrenci eklenmedi. Yukarıdan ekleyebilir veya Excel\'den aktarabilirsiniz.')
-        : 'Bu filtre kriterlerine uyan kayıtlı öğrenci yok.';
+      if (filterGrup) {
+        empty.textContent = '"' + filterGrup + '" sınıfına/grubuna ait henüz öğrenci kaydı bulunmuyor.';
+      } else if (filterBolum) {
+        empty.textContent = '"' + filterBolum + '" bölümüne ait öğrenci kaydı bulunmuyor.';
+      } else if (students.length === 0) {
+        empty.textContent = !isUserAdmin()
+          ? 'Size atanan sınıflarda henüz kayıtlı öğrenci bulunmuyor. Yeni öğrenci ekleyebilir veya bulut senkronizasyonu yapabilirsiniz.'
+          : 'Henüz öğrenci eklenmedi. Yukarıdan ekleyebilir veya Excel\'den aktarabilirsiniz.';
+      } else {
+        empty.textContent = 'Bu filtre kriterlerine uyan kayıtlı öğrenci yok.';
+      }
     }
     return;
   }
@@ -2729,13 +2776,15 @@ if (addStudentBtn) {
     var soyad = document.getElementById('s-soyad').value.trim();
     if(!ad || !soyad){ alert('Lütfen öğrencinin adını ve soyadını girin.'); return; }
 
+    var groupToAssign = selectedGrup || (!isUserAdmin() && getAssignedGroups().length === 1 ? getAssignedGroups()[0] : '');
+
     students.push({
       id: Date.now() + Math.random().toString(16).slice(2),
       ad: ad,
       soyad: soyad,
       bolum: selectedBolum,
       kur: selectedKur,
-      grup: selectedGrup,
+      grup: groupToAssign,
       ownerUid: currentAuthUser.uid,
       ownerEmail: currentAuthUser.email || ''
     });
@@ -2761,7 +2810,7 @@ if (cloudSyncBtn) {
 
       var adminMode = isUserAdmin();
       var studentsToSave = students
-        .filter(function(s) { return adminMode || !s.ownerUid || s.ownerUid === currentAuthUser.uid; })
+        .filter(function(s) { return adminMode || !s.ownerUid || s.ownerUid === currentAuthUser.uid || canTeacherAccessStudent(s); })
         .map(function(s) {
           return Object.assign({}, s, {
             ownerUid: s.ownerUid || currentAuthUser.uid,
@@ -2920,11 +2969,7 @@ async function loadFromCloud() {
 
   try {
     var adminMode = isUserAdmin();
-    var sQuery = adminMode
-      ? db.collection('students')
-      : db.collection('students').where('ownerUid', '==', currentAuthUser.uid);
-
-    const sSnap = await sQuery.get();
+    const sSnap = await db.collection('students').get();
     var fetchedStudents = sSnap.docs.map(function(doc) {
       var d = doc.data();
       d.id = d.id || doc.id;
@@ -2941,11 +2986,7 @@ async function loadFromCloud() {
     saveGruplar();
 
     var allowedIds = new Set(students.map(function(s) { return s.id; }));
-    var aQuery = adminMode
-      ? db.collection('absences')
-      : db.collection('absences').where('ownerUid', '==', currentAuthUser.uid);
-
-    const aSnap = await aQuery.get();
+    const aSnap = await db.collection('absences').get();
     absences = aSnap.docs.map(function(doc) {
       var a = doc.data();
       a.id = a.id || doc.id;
@@ -2955,8 +2996,8 @@ async function loadFromCloud() {
     });
     saveAbsences();
 
-    if (filterBolum && departments.indexOf(filterBolum) === -1) filterBolum = '';
-    if (filterGrup && gruplar.indexOf(filterGrup) === -1) filterGrup = '';
+    if (filterBolum && !listIncludesNormalized(departments, filterBolum)) filterBolum = '';
+    if (filterGrup && !listIncludesNormalized(gruplar, filterGrup)) filterGrup = '';
 
     renderChips();
     renderFilterChips();
